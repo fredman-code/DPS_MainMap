@@ -1,0 +1,119 @@
+import React, { useState, useEffect } from 'react';
+import { View, StyleSheet, Text } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
+import { collection, getDocs } from 'firebase/firestore';
+import db from '../firebaseConfig'; // Ensure db is initialized with getFirestore(app)
+import { maps } from './data';
+
+// Create a combined list of classrooms from all floors.
+// Each classroom has its floor name, id, and a fallback name.
+const allClassrooms = maps.reduce<{ floor: string; id: number; fallbackName: string }[]>((acc, map) => {
+  const floor = map.name;
+  map.corridors.forEach(corridor => {
+    corridor.rooms.forEach(roomNumber => {
+      // Fallback name: "Floor: Class X"
+      acc.push({
+        floor,
+        id: roomNumber,
+        fallbackName: `${floor}: Class ${roomNumber}`,
+      });
+    });
+  });
+  return acc;
+}, []);
+
+const AllClassroomsScreen: React.FC = () => {
+  // We'll store the fetched names grouped by floor.
+  // For example: { "Primary GF": { 1: "KG 1 - A", 2: "KG 1 - B", ... }, "Primary FF": { ... } }
+  const [classroomNamesByFloor, setClassroomNamesByFloor] = useState<Record<string, Record<number, string>>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+  
+  // The selected classroom is stored as a string combining floor and room id, e.g. "Primary GF-1"
+  const [selectedClass1, setSelectedClass1] = useState<string | null>(null);
+  const [selectedClass2, setSelectedClass2] = useState<string | null>(null);
+
+  // Fetch classroom names from Firestore for each floor in maps.
+  useEffect(() => {
+    const fetchAllNames = async () => {
+      const namesByFloor: Record<string, Record<number, string>> = {};
+      for (const map of maps) {
+        try {
+          const snapshot = await getDocs(collection(db, map.name));
+          const floorNames: Record<number, string> = {};
+          snapshot.forEach(doc => {
+            const docId = parseInt(doc.id, 10);
+            const data = doc.data();
+            const fieldNames = Object.keys(data);
+            if (fieldNames.length > 0) {
+              floorNames[docId] = fieldNames[0];
+            }
+          });
+          namesByFloor[map.name] = floorNames;
+        } catch (error) {
+          console.error(`Error fetching names for ${map.name}:`, error);
+        }
+      }
+      setClassroomNamesByFloor(namesByFloor);
+      setLoading(false);
+    };
+    fetchAllNames();
+  }, []);
+
+  return (
+    <View style={styles.container}>
+      <Text style={styles.title}>Select Classrooms (All Floors)</Text>
+      <Picker
+        selectedValue={selectedClass1}
+        onValueChange={(itemValue) => setSelectedClass1(itemValue)}
+        style={styles.picker}
+      >
+        <Picker.Item label="Select Classroom 1" value={null} />
+        {allClassrooms.map(cls => {
+          const firebaseName = classroomNamesByFloor[cls.floor]?.[cls.id];
+          const label = firebaseName ? `${cls.floor}: ${firebaseName}` : cls.fallbackName;
+          const value = `${cls.floor}-${cls.id}`; // unique key
+          return <Picker.Item key={value} label={label} value={value} />;
+        })}
+      </Picker>
+      <Picker
+        selectedValue={selectedClass2}
+        onValueChange={(itemValue) => setSelectedClass2(itemValue)}
+        style={styles.picker}
+      >
+        <Picker.Item label="Select Classroom 2" value={null} />
+        {allClassrooms.map(cls => {
+          const firebaseName = classroomNamesByFloor[cls.floor]?.[cls.id];
+          const label = firebaseName ? `${cls.floor}: ${firebaseName}` : cls.fallbackName;
+          const value = `${cls.floor}-${cls.id}`;
+          return <Picker.Item key={value} label={label} value={value} />;
+        })}
+      </Picker>
+      {loading && <Text style={styles.loading}>Loading classroom names...</Text>}
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: { 
+    flex: 1, 
+    backgroundColor: '#fff', 
+    justifyContent: 'center', 
+    alignItems: 'center' 
+  },
+  title: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    marginBottom: 20,
+  },
+  picker: { 
+    height: 50, 
+    width: 300, 
+    marginVertical: 10 
+  },
+  loading: {
+    marginTop: 20,
+    fontStyle: 'italic',
+  },
+});
+
+export default AllClassroomsScreen;

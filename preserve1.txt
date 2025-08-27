@@ -1,0 +1,205 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Image,
+  Dimensions,
+  StyleSheet,
+  ScrollView,
+  ActivityIndicator,
+  Animated,
+  PanResponder,
+} from 'react-native';
+import { Picker } from '@react-native-picker/picker';
+import Svg, { Line } from 'react-native-svg';
+import { adjustClassToCorridor } from './utils';
+import { maps } from './data';
+import { collection, getDocs } from 'firebase/firestore';
+import db from '../firebaseConfig';
+
+type MapViewProps = {
+  map: typeof maps[0]; // Type to refer to a single map object
+};
+
+const MapView: React.FC<MapViewProps> = ({ map }) => {
+  const screenWidth = Dimensions.get('window').width;
+  const screenHeight = Dimensions.get('window').height;
+
+  const [selectedPoint1, setSelectedPoint1] = useState<number | null>(null);
+  const [selectedPoint2, setSelectedPoint2] = useState<number | null>(null);
+  const [opacity, setOpacity] = useState<number>(1);
+  const [classroomNames, setClassroomNames] = useState<Record<number, string>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+
+  const scale = useRef(new Animated.Value(1)).current; // For pinch-to-zoom
+  const translateX = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(0)).current;
+
+  const widthRatio = screenWidth / map.originalWidth;
+  const heightRatio = screenHeight / map.originalHeight;
+  const baseScale = Math.min(widthRatio, heightRatio);
+
+  // Fetch classroom names from Firestore
+  useEffect(() => {
+    const fetchClassroomNames = async () => {
+      try {
+        setLoading(true);
+        const querySnapshot = await getDocs(collection(db, map.name));
+        const names: Record<number, string> = {};
+        querySnapshot.forEach((doc) => {
+          const docId = parseInt(doc.id, 10);
+          const fieldNames = Object.keys(doc.data());
+          if (fieldNames.length > 0) {
+            names[docId] = fieldNames[0]; // Get the first field name (classroom name)
+          }
+        });
+        setClassroomNames(names);
+      } catch (error) {
+        console.error("Error fetching classroom names: ", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchClassroomNames();
+  }, [map.name]);
+
+  // Apply adjustments to all points
+  const adjustedPoints = map.points.map((point, index) => {
+    let corridor = map.corridors.find((c) => c.rooms.includes(index + 1));
+    return corridor ? adjustClassToCorridor(point, corridor.coords) : point;
+  });
+
+  useEffect(() => {
+    if (selectedPoint1 !== null && selectedPoint2 !== null) {
+      let interval = setInterval(() => {
+        setOpacity((prev) => (prev === 1 ? 0.3 : 1)); // Toggle opacity for illumination
+      }, 500);
+      return () => clearInterval(interval);
+    }
+  }, [selectedPoint1, selectedPoint2]);
+
+  const scaleCoords = (coords: [number, number]) => ({
+    x: coords[0] * baseScale,
+    y: coords[1] * baseScale,
+  });
+
+  // Gesture handlers for pinch-to-zoom and pan
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderMove: (event, gestureState) => {
+        if (gestureState.numberActiveTouches === 2) {
+          const newScale = Math.max(1, Math.min(3, scale._value * (gestureState.scale || 1)));
+          scale.setValue(newScale);
+        } else {
+          translateX.setValue(gestureState.dx);
+          translateY.setValue(gestureState.dy);
+        }
+      },
+      onPanResponderRelease: () => {
+        Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
+        Animated.spring(translateY, { toValue: 0, useNativeDriver: true }).start();
+      },
+    })
+  ).current;
+
+  return (
+    <ScrollView
+      style={styles.scrollContainer}
+      maximumZoomScale={3}
+      minimumZoomScale={1}
+      contentContainerStyle={{ alignItems: 'center' }}
+    >
+      <Animated.View
+        style={[
+          styles.imageContainer,
+          {
+            transform: [
+              { scale: scale },
+              { translateX: translateX },
+              { translateY: translateY },
+            ],
+          },
+        ]}
+        {...panResponder.panHandlers}
+      >
+        <Image
+          source={map.image}
+          style={{ width: map.originalWidth * baseScale, height: map.originalHeight * baseScale }}
+          resizeMode="contain"
+        />
+        <Svg width={map.originalWidth * baseScale} height={map.originalHeight * baseScale} style={styles.svgOverlay}>
+          {/* Draw Line if Two Points Are Selected */}
+          {selectedPoint1 !== null && selectedPoint2 !== null && (
+            <Line
+              x1={scaleCoords(adjustedPoints[selectedPoint1]).x}
+              y1={scaleCoords(adjustedPoints[selectedPoint1]).y}
+              x2={scaleCoords(adjustedPoints[selectedPoint2]).x}
+              y2={scaleCoords(adjustedPoints[selectedPoint2]).y}
+              stroke="yellow"
+              strokeWidth="3"
+              strokeOpacity={opacity}
+            />
+          )}
+        </Svg>
+      </Animated.View>
+
+      {/* Loading Indicator */}
+      {loading && <ActivityIndicator size="large" color="blue" />}
+
+      {/* Dropdowns for Selecting Points */}
+      <View style={styles.dropdownContainer}>
+        <Picker
+          selectedValue={selectedPoint1}
+          onValueChange={(itemValue: number | null) => setSelectedPoint1(itemValue)}
+          style={styles.picker}
+        >
+          <Picker.Item label="Select Classroom 1" value={null} />
+          {Object.entries(classroomNames).map(([id, name]) => (
+            <Picker.Item key={id} label={name} value={parseInt(id, 10) - 1} />
+          ))}
+        </Picker>
+
+        <Picker
+          selectedValue={selectedPoint2}
+          onValueChange={(itemValue: number | null) => setSelectedPoint2(itemValue)}
+          style={styles.picker}
+        >
+          <Picker.Item label="Select Classroom 2" value={null} />
+          {Object.entries(classroomNames).map(([id, name]) => (
+            <Picker.Item key={id} label={name} value={parseInt(id, 10) - 1} />
+          ))}
+        </Picker>
+      </View>
+    </ScrollView>
+  );
+};
+
+const styles = StyleSheet.create({
+  scrollContainer: {
+    flex: 1,
+    backgroundColor: '#fff',
+  },
+  imageContainer: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  svgOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+  },
+  dropdownContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginVertical: 10,
+    backgroundColor: '#f2f2f2',
+    padding: 10,
+  },
+  picker: {
+    height: 50,
+    width: 200,
+  },
+});
+
+export default MapView;

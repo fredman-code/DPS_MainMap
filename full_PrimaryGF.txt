@@ -1,0 +1,844 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  View, 
+  Image, 
+  Dimensions, 
+  StyleSheet, 
+  Text, 
+  TouchableOpacity 
+} from 'react-native';
+import { Picker } from '@react-native-picker/picker';
+import Svg, { Line } from 'react-native-svg';
+import { collection, getDocs } from 'firebase/firestore';
+import db from '../firebaseConfig';
+import { adjustedMaps } from './data';
+
+// Extract the Primary GF map data from adjustedMaps
+const primaryGF = adjustedMaps.find(map => map.name === "Primary GF");
+
+if (!primaryGF) {
+  throw new Error("Primary GF map not found in adjustedMaps");
+}
+
+const mapData = {
+  name: primaryGF.name,
+  image: primaryGF.image,
+  originalWidth: primaryGF.originalWidth,
+  originalHeight: primaryGF.originalHeight,
+};
+
+// Use the original turning points
+const roadPoints: number[][] = [
+  [249, 1009], [254, 1623], [636, 1622], [644, 1012], [646, 1205],
+  [820, 1200], [910, 1303], [643, 1422], [844, 1417],
+  [2256, 1009], [2251, 1617], [1866, 1613], [1869, 1018], [1862, 1185],
+  [1678, 1206], [1605, 1304], [1661, 1412], [1852, 1421]
+];
+
+// Build classroom list from corridors in "Primary GF"
+const classrooms = primaryGF.corridors.reduce<{ id: number; coords: number[]; name: string }[]>(
+  (acc, corridor) => {
+    corridor.rooms.forEach(roomNumber => {
+      const point = primaryGF.points[roomNumber - 1]; // 1-based index
+      if (point) {
+        acc.push({
+          id: roomNumber,
+          coords: point,
+          name: `Class ${roomNumber}`, // Fallback name
+        });
+      }
+    });
+    return acc;
+  },
+  []
+);
+
+// ------------------------------
+// Scaling Setup
+// ------------------------------
+const screenWidth = Dimensions.get('window').width;
+const screenHeight = Dimensions.get('window').height;
+const widthRatio = screenWidth / mapData.originalWidth;
+const heightRatio = screenHeight / mapData.originalHeight;
+const baseScale = Math.min(widthRatio, heightRatio);
+
+const normalize = ([x, y]: number[]) => ({
+  x: x * baseScale,
+  y: y * baseScale,
+});
+
+const normalizedRoadPoints = roadPoints.map(normalize);
+const normalizedClassrooms = classrooms.map(({ id, coords, name }) => ({
+  id,
+  name,
+  coords: normalize(coords),
+}));
+
+// ------------------------------
+// Road Connections (unchanged)
+// ------------------------------
+const roadConnections = new Map<number, number[]>([
+  [1, [2, 4]], [2, [1, 3]], [3, [2, 8]], [4, [1, 5]],
+  [5, [4, 6, 8]], [6, [5, 7]], [7, [6, 9, 16]], [8, [3, 5, 9]],
+  [9, [7, 8]], [10, [13]], [11, [12]], [12, [11, 18]],
+  [13, [10, 14]], [14, [13, 15, 18]], [15, [14, 16]], [16, [7, 15, 17]],
+  [17, [16, 18]], [18, [12, 14, 17]]
+]);
+
+// ------------------------------
+// Utility Functions
+// ------------------------------
+const getClosestPointIndex = (classroomCoords: { x: number; y: number }): number => {
+  let closestIndex = 0;
+  let minDistance = Infinity;
+  normalizedRoadPoints.forEach((point, index) => {
+    const distance = Math.sqrt(
+      Math.pow(point.x - classroomCoords.x, 2) + Math.pow(point.y - classroomCoords.y, 2)
+    );
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestIndex = index;
+    }
+  });
+  return closestIndex;
+};
+
+const findValidPath = (start: number, end: number): number[] => {
+  let queue: number[][] = [[start]];
+  let visited = new Set<number>();
+
+  while (queue.length > 0) {
+    const path = queue.shift();
+    if (!path) continue;
+    const lastNode = path[path.length - 1];
+    if (lastNode === end) return path;
+
+    if (!visited.has(lastNode)) {
+      visited.add(lastNode);
+      const neighbors = roadConnections.get(lastNode + 1); // 1-based
+      if (neighbors) {
+        for (const neighbor of neighbors) {
+          if (!visited.has(neighbor - 1)) {
+            queue.push([...path, neighbor - 1]);
+          }
+        }
+      }
+    }
+  }
+  return [];
+};
+
+// ------------------------------
+// MapOverlay Component
+// ------------------------------
+const MapOverlay: React.FC = () => {
+  const [selectedClass1, setSelectedClass1] = useState<number | null>(null);
+  const [selectedClass2, setSelectedClass2] = useState<number | null>(null);
+  const [selectedPath, setSelectedPath] = useState<number[]>([]);
+  const [classroomNames, setClassroomNames] = useState<Record<number, string>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+
+  // Fetch classroom names from Firestore (match doc ID to classroom.id)
+  useEffect(() => {
+    const fetchClassroomNames = async () => {
+      try {
+        setLoading(true);
+        // The collection name is the same as mapData.name, e.g. "Primary GF"
+        const snapshot = await getDocs(collection(db,mapData.name));
+        console.log(db)
+        console.log(mapData)
+        const names: Record<number, string> = {};
+
+        snapshot.forEach(doc => {
+          // Convert doc ID (e.g., "1", "10") to a number
+          const docId = parseInt(doc.id, 10);
+          const data = doc.data();
+          // If your Firestore doc has "KG 1 - A": "some value",
+          // we can use the first field name as the label
+          const fieldNames = Object.keys(data);
+          if (fieldNames.length > 0) {
+            // For example, fieldNames[0] might be "KG 1 - A"
+            names[docId] = fieldNames[0];
+          }
+        });
+
+        setClassroomNames(names);
+      } catch (error) {
+        console.error("Error fetching classroom names: ", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchClassroomNames();
+  }, [mapData.name]);
+
+  const handleSelection = () => {
+    if (selectedClass1 !== null && selectedClass2 !== null) {
+      const closestPoint1 = getClosestPointIndex(normalizedClassrooms[selectedClass1].coords);
+      const closestPoint2 = getClosestPointIndex(normalizedClassrooms[selectedClass2].coords);
+      const validPath = findValidPath(closestPoint1, closestPoint2);
+      setSelectedPath(validPath);
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      {/* Background Image */}
+      <Image
+        source={mapData.image}
+        style={{
+          width: mapData.originalWidth * baseScale,
+          height: mapData.originalHeight * baseScale
+        }}
+        resizeMode="contain"
+      />
+
+      {/* Overlay SVG Elements */}
+      <Svg
+        width={mapData.originalWidth * baseScale}
+        height={mapData.originalHeight * baseScale}
+        style={styles.svgOverlay}
+        pointerEvents="none"
+      >
+        {/* Draw the valid road path */}
+        {selectedPath.map((pointIndex, i) => {
+          if (i === selectedPath.length - 1) return null;
+          const nextPointIndex = selectedPath[i + 1];
+          return (
+            <Line
+              key={i}
+              x1={normalizedRoadPoints[pointIndex].x}
+              y1={normalizedRoadPoints[pointIndex].y}
+              x2={normalizedRoadPoints[nextPointIndex].x}
+              y2={normalizedRoadPoints[nextPointIndex].y}
+              stroke="#333"
+              strokeWidth={2}
+            />
+          );
+        })}
+        {/* Draw connection lines from classrooms to the road */}
+        {selectedClass1 !== null && selectedPath.length > 0 && (
+          <Line
+            x1={normalizedClassrooms[selectedClass1].coords.x}
+            y1={normalizedClassrooms[selectedClass1].coords.y}
+            x2={normalizedRoadPoints[selectedPath[0]].x}
+            y2={normalizedRoadPoints[selectedPath[0]].y}
+            stroke="#333"
+            strokeWidth={2}
+          />
+        )}
+        {selectedClass2 !== null && selectedPath.length > 0 && (
+          <Line
+            x1={normalizedClassrooms[selectedClass2].coords.x}
+            y1={normalizedClassrooms[selectedClass2].coords.y}
+            x2={normalizedRoadPoints[selectedPath[selectedPath.length - 1]].x}
+            y2={normalizedRoadPoints[selectedPath[selectedPath.length - 1]].y}
+            stroke="#333"
+            strokeWidth={2}
+          />
+        )}
+      </Svg>
+
+      {/* Dropdowns for Classroom Selection */}
+      <View style={styles.dropdownContainer}>
+        <Picker
+          selectedValue={selectedClass1}
+          onValueChange={(itemValue) => setSelectedClass1(itemValue)}
+          style={styles.picker}
+        >
+          <Picker.Item label="Select Classroom 1" value={null} />
+          {normalizedClassrooms.map((classroom, idx) => (
+            <Picker.Item
+              key={classroom.id}
+              // If a Firestore name was found for doc ID = classroom.id, use that.
+              // Otherwise, fall back to the default name "Class X".
+              label={classroomNames[classroom.id] || classroom.name}
+              value={idx}
+            />
+          ))}
+        </Picker>
+        <Picker
+          selectedValue={selectedClass2}
+          onValueChange={(itemValue) => setSelectedClass2(itemValue)}
+          style={styles.picker}
+        >
+          <Picker.Item label="Select Classroom 2" value={null} />
+          {normalizedClassrooms.map((classroom, idx) => (
+            <Picker.Item
+              key={classroom.id}
+              label={classroomNames[classroom.id] || classroom.name}
+              value={idx}
+            />
+          ))}
+        </Picker>
+      </View>
+
+      {/* Confirm Selection Button */}
+      <TouchableOpacity style={styles.button} onPress={handleSelection}>
+        <Text style={styles.buttonText}>Confirm Selection</Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#fff', alignItems: 'center' },
+  svgOverlay: { position: 'absolute', top: 0, left: 0 },
+  dropdownContainer: { flexDirection: 'row', marginVertical: 10, backgroundColor: '#f2f2f2', padding: 10 },
+  picker: { height: 50, width: 180 },
+  button: { marginTop: 10, backgroundColor: 'blue', padding: 10 },
+  buttonText: { color: 'white', fontSize: 18, fontWeight: 'bold' },
+});
+
+export default MapOverlay;
+
+
+
+
+
+
+import React, { useState, useEffect } from 'react';
+import { 
+  View, 
+  Image, 
+  Dimensions, 
+  StyleSheet, 
+  Text, 
+  TouchableOpacity,
+  Alert
+} from 'react-native';
+import { Picker } from '@react-native-picker/picker';
+import Svg, { Line } from 'react-native-svg';
+import { collection, getDocs } from 'firebase/firestore';
+import db from '../firebaseConfig';
+import { adjustedMaps } from './data';
+
+// ----- 1. Select a Map (for example, "Primary GF") -----
+const selectedMap = adjustedMaps.find(map => map.name === "Primary GF");
+if (!selectedMap) {
+  throw new Error("Selected map not found");
+}
+const mapData = {
+  name: selectedMap.name,
+  image: selectedMap.image,
+  originalWidth: selectedMap.originalWidth,
+  originalHeight: selectedMap.originalHeight,
+  stairs: selectedMap.stairs || [] // ensure stairs are defined in data.ts for this floor
+};
+
+// ----- 2. Build Classroom List from Corridors -----
+const classrooms = selectedMap.corridors.reduce<{ id: number; name: string; coords: [number, number] }[]>((acc, corridor) => {
+  corridor.rooms.forEach(roomNumber => {
+    const point = selectedMap.points[roomNumber - 1]; // 1-indexed
+    if (point) {
+      acc.push({
+        id: roomNumber,
+        name: `Class ${roomNumber}`, // fallback name; Firebase may override
+        coords: point as [number, number],
+      });
+    }
+  });
+  return acc;
+}, []);
+
+// ----- 3. Turning Points & Road Connections -----
+// Turning points (base coordinates)
+const roadPoints: number[][] = [
+  [249, 1009], [254, 1623], [636, 1622], [644, 1012], [646, 1205],
+  [820, 1200], [910, 1303], [643, 1422], [844, 1417],
+  [2256, 1009], [2251, 1617], [1866, 1613], [1869, 1018], [1862, 1185],
+  [1678, 1206], [1605, 1304], [1661, 1412], [1852, 1421]
+];
+// Road connections (1-indexed)
+const roadConnections = new Map<number, number[]>([
+  [1, [2, 4]], [2, [1, 3]], [3, [2, 8]], [4, [1, 5]],
+  [5, [4, 6, 8]], [6, [5, 7]], [7, [6, 9, 16]], [8, [3, 5, 9]],
+  [9, [7, 8]], [10, [13]], [11, [12]], [12, [11, 18]],
+  [13, [10, 14]], [14, [13, 15, 18]], [15, [14, 16]], [16, [7, 15, 17]],
+  [17, [16, 18]], [18, [12, 14, 17]]
+]);
+// When running BFS we convert 1-indexed keys: we use (lastNode+1) then subtract 1 from each neighbor.
+
+// ----- 4. Scaling Setup -----
+const screenWidth = Dimensions.get('window').width;
+const screenHeight = Dimensions.get('window').height;
+const widthRatio = screenWidth / mapData.originalWidth;
+const heightRatio = screenHeight / mapData.originalHeight;
+const baseScale = Math.min(widthRatio, heightRatio);
+
+const normalize = ([x, y]: number[]): { x: number; y: number } => ({
+  x: x * baseScale,
+  y: y * baseScale,
+});
+
+const normalizedRoadPoints = roadPoints.map(normalize);
+const normalizedClassrooms = classrooms.map(({ id, coords, name }) => ({
+  id,
+  name,
+  coords: normalize(coords),
+}));
+
+// Normalize stairs from mapData.stairs
+const normalizedStairs = mapData.stairs.map(normalize);
+
+// ----- 5. Helper Functions for Corridor Detection -----
+// Returns the corridor object in which a room (by its id) belongs (or null if not found)
+const getCorridorForRoom = (roomId: number): { id: number; coords: [number, number, number, number] } | null => {
+  for (const corridor of selectedMap.corridors) {
+    if (corridor.rooms.includes(roomId)) {
+      return { id: corridor.id, coords: corridor.coords };
+    }
+  }
+  return null;
+};
+
+// Checks if a normalized point is inside a corridor's normalized bounding box.
+const isPointInCorridor = (point: { x: number; y: number }, corridorCoords: [number, number, number, number]): boolean => {
+  const [x1, y1, x2, y2] = corridorCoords.map(c => c * baseScale);
+  return (point.x >= x1 && point.x <= x2 && point.y >= y1 && point.y <= y2);
+};
+
+// ----- 6. Utility Functions (BFS and Nearest Endpoint) -----
+const getClosestPointIndex = (coord: { x: number; y: number }): number => {
+  let closestIndex = 0;
+  let minDistance = Infinity;
+  normalizedRoadPoints.forEach((pt, i) => {
+    const d = Math.sqrt((pt.x - coord.x) ** 2 + (pt.y - coord.y) ** 2);
+    if (d < minDistance) {
+      minDistance = d;
+      closestIndex = i;
+    }
+  });
+  return closestIndex;
+};
+
+const findValidPath = (start: number, end: number): number[] => {
+  let queue: number[][] = [[start]];
+  let visited = new Set<number>();
+  while (queue.length > 0) {
+    const path = queue.shift();
+    if (!path) continue;
+    const last = path[path.length - 1];
+    if (last === end) return path;
+    if (!visited.has(last)) {
+      visited.add(last);
+      const neighbors = roadConnections.get(last + 1); // convert 0-indexed last to 1-indexed key
+      if (neighbors) {
+        for (const neighbor of neighbors) {
+          const neighbor0 = neighbor - 1;
+          if (!visited.has(neighbor0)) {
+            queue.push([...path, neighbor0]);
+          }
+        }
+      }
+    }
+  }
+  return [];
+};
+
+const findNearestStair = (coord: { x: number; y: number }): { x: number; y: number } | null => {
+  let nearest = null;
+  let minDist = Infinity;
+  normalizedStairs.forEach(pt => {
+    const d = Math.sqrt((pt.x - coord.x) ** 2 + (pt.y - coord.y) ** 2);
+    if (d < minDist) {
+      minDist = d;
+      nearest = pt;
+    }
+  });
+  return nearest;
+};
+
+const findNearestClassroom = (coord: { x: number; y: number }): { x: number; y: number } | null => {
+  let nearest = null;
+  let minDist = Infinity;
+  normalizedClassrooms.forEach(cls => {
+    const d = Math.sqrt((cls.coords.x - coord.x) ** 2 + (cls.coords.y - coord.y) ** 2);
+    if (d < minDist) {
+      minDist = d;
+      nearest = cls.coords;
+    }
+  });
+  return nearest;
+};
+
+// ----- 7. Multi-Connection Component -----
+type ConnectionType = 'class-to-class' | 'class-to-stair' | 'stair-to-class';
+
+const MultiConnectionScreen: React.FC = () => {
+  const [connectionType, setConnectionType] = useState<ConnectionType>('class-to-class');
+  
+  // For class-to-class:
+  const [selectedClass1, setSelectedClass1] = useState<number | null>(null);
+  const [selectedClass2, setSelectedClass2] = useState<number | null>(null);
+  
+  // For class-to-stair:
+  const [selectedClass, setSelectedClass] = useState<number | null>(null);
+  const [selectedStair, setSelectedStair] = useState<number | null>(null);
+  
+  // For stair-to-class:
+  const [selectedStairOnly, setSelectedStairOnly] = useState<number | null>(null);
+  const [selectedClassOnly, setSelectedClassOnly] = useState<number | null>(null);
+  
+  // Polyline path state (endpoints and turning point indices)
+  const [linePath, setLinePath] = useState<{ from: { x: number; y: number }, path: number[], to: { x: number; y: number } } | null>(null);
+  
+  // Fetch classroom names from Firestore (optional)
+  const [classroomNames, setClassroomNames] = useState<Record<number, string>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+  
+  useEffect(() => {
+    const fetchNames = async () => {
+      try {
+        setLoading(true);
+        const snapshot = await getDocs(collection(db, mapData.name));
+        const names: Record<number, string> = {};
+        snapshot.forEach(doc => {
+          const docId = parseInt(doc.id, 10);
+          const data = doc.data();
+          const fields = Object.keys(data);
+          if (fields.length > 0) {
+            names[docId] = fields[0];
+          }
+        });
+        setClassroomNames(names);
+      } catch (error) {
+        console.error("Error fetching classroom names:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchNames();
+  }, [mapData.name]);
+  
+  const handleConfirm = () => {
+    setLinePath(null);
+    if (connectionType === 'class-to-class') {
+      if (selectedClass1 === null || selectedClass2 === null) {
+        Alert.alert("Error", "Please select two classrooms.");
+        return;
+      }
+      const cls1 = normalizedClassrooms.find(c => c.id === selectedClass1);
+      const cls2 = normalizedClassrooms.find(c => c.id === selectedClass2);
+      if (!cls1 || !cls2) {
+        Alert.alert("Error", "Selected classroom not found.");
+        return;
+      }
+      // Check if both classrooms are in the same corridor.
+      const corridor1 = getCorridorForRoom(cls1.id);
+      const corridor2 = getCorridorForRoom(cls2.id);
+      if (corridor1 && corridor2 && corridor1.id === corridor2.id) {
+        // Direct connection.
+        setLinePath({ from: cls1.coords, path: [], to: cls2.coords });
+      } else {
+        const cp1 = getClosestPointIndex(cls1.coords);
+        const cp2 = getClosestPointIndex(cls2.coords);
+        const path = findValidPath(cp1, cp2);
+        if (path.length === 0) {
+          Alert.alert("Warning", "No valid path found.");
+          return;
+        }
+        setLinePath({ from: cls1.coords, path, to: cls2.coords });
+      }
+    } else if (connectionType === 'class-to-stair') {
+      if (selectedClass === null) {
+        Alert.alert("Error", "Please select a classroom.");
+        return;
+      }
+      const cls = normalizedClassrooms.find(c => c.id === selectedClass);
+      if (!cls) {
+        Alert.alert("Error", "Classroom not found.");
+        return;
+      }
+      let stairCoord;
+      if (selectedStair !== null) {
+        stairCoord = normalizedStairs[selectedStair];
+      } else {
+        stairCoord = findNearestStair(cls.coords);
+      }
+      if (!stairCoord) {
+        Alert.alert("Error", "No stair found.");
+        return;
+      }
+      // Check if the classroom and stair fall in the same corridor.
+      const corridor = getCorridorForRoom(cls.id);
+      if (corridor && isPointInCorridor(stairCoord, corridor.coords)) {
+        // Direct connection.
+        setLinePath({ from: cls.coords, path: [], to: stairCoord });
+      } else {
+        const cpClass = getClosestPointIndex(cls.coords);
+        const cpStair = getClosestPointIndex(stairCoord);
+        const path = findValidPath(cpClass, cpStair);
+        if (path.length === 0) {
+          Alert.alert("Warning", "No valid path found.");
+          return;
+        }
+        setLinePath({ from: cls.coords, path, to: stairCoord });
+      }
+    } else if (connectionType === 'stair-to-class') {
+      if (selectedStairOnly === null) {
+        Alert.alert("Error", "Please select a stair.");
+        return;
+      }
+      let stairCoord = normalizedStairs[selectedStairOnly];
+      let clsCoord;
+      if (selectedClassOnly !== null) {
+        const cls = normalizedClassrooms.find(c => c.id === selectedClassOnly);
+        if (!cls) {
+          Alert.alert("Error", "Selected classroom not found.");
+          return;
+        }
+        clsCoord = cls.coords;
+      } else {
+        clsCoord = findNearestClassroom(stairCoord);
+      }
+      if (!clsCoord) {
+        Alert.alert("Error", "No classroom found.");
+        return;
+      }
+      // Check if the classroom and stair fall in the same corridor.
+      // We try to determine the corridor for the classroom (if any).
+      const corridor = getCorridorForRoom(
+        normalizedClassrooms.find(c => c.coords === clsCoord)?.id || 0
+      );
+      if (corridor && isPointInCorridor(stairCoord, corridor.coords)) {
+        setLinePath({ from: stairCoord, path: [], to: clsCoord });
+      } else {
+        const cpStair = getClosestPointIndex(stairCoord);
+        const cpClass = getClosestPointIndex(clsCoord);
+        const path = findValidPath(cpStair, cpClass);
+        if (path.length === 0) {
+          Alert.alert("Warning", "No valid path found.");
+          return;
+        }
+        setLinePath({ from: stairCoord, path, to: clsCoord });
+      }
+    }
+  };
+  
+  return (
+    <View style={styles.container}>
+      <Text style={styles.title}>Select Connection Type</Text>
+      <View style={styles.typeContainer}>
+        <TouchableOpacity 
+          style={[styles.typeButton, connectionType === 'class-to-class' && styles.typeButtonActive]} 
+          onPress={() => setConnectionType('class-to-class')}
+        >
+          <Text style={styles.typeButtonText}>Class to Class</Text>
+        </TouchableOpacity>
+        <TouchableOpacity 
+          style={[styles.typeButton, connectionType === 'class-to-stair' && styles.typeButtonActive]} 
+          onPress={() => setConnectionType('class-to-stair')}
+        >
+          <Text style={styles.typeButtonText}>Class to Stair</Text>
+        </TouchableOpacity>
+        <TouchableOpacity 
+          style={[styles.typeButton, connectionType === 'stair-to-class' && styles.typeButtonActive]} 
+          onPress={() => setConnectionType('stair-to-class')}
+        >
+          <Text style={styles.typeButtonText}>Stair to Class</Text>
+        </TouchableOpacity>
+      </View>
+      {connectionType === 'class-to-class' && (
+        <View style={styles.dropdownContainer}>
+          <Picker
+            selectedValue={selectedClass1}
+            onValueChange={(val) => setSelectedClass1(val)}
+            style={styles.picker}
+          >
+            <Picker.Item label="Select Classroom 1" value={null} />
+            {normalizedClassrooms.map(cls => (
+              <Picker.Item key={cls.id} label={classroomNames[cls.id] || cls.name} value={cls.id} />
+            ))}
+          </Picker>
+          <Picker
+            selectedValue={selectedClass2}
+            onValueChange={(val) => setSelectedClass2(val)}
+            style={styles.picker}
+          >
+            <Picker.Item label="Select Classroom 2" value={null} />
+            {normalizedClassrooms.map(cls => (
+              <Picker.Item key={cls.id} label={classroomNames[cls.id] || cls.name} value={cls.id} />
+            ))}
+          </Picker>
+        </View>
+      )}
+      {connectionType === 'class-to-stair' && (
+        <View style={styles.dropdownContainer}>
+          <Picker
+            selectedValue={selectedClass}
+            onValueChange={(val) => setSelectedClass(val)}
+            style={styles.picker}
+          >
+            <Picker.Item label="Select Classroom" value={null} />
+            {normalizedClassrooms.map(cls => (
+              <Picker.Item key={cls.id} label={classroomNames[cls.id] || cls.name} value={cls.id} />
+            ))}
+          </Picker>
+          <Picker
+            selectedValue={selectedStair}
+            onValueChange={(val) => setSelectedStair(val)}
+            style={styles.picker}
+          >
+            <Picker.Item label="Select Stair (optional)" value={null} />
+            {normalizedStairs.map((pt, idx) => (
+              <Picker.Item key={idx} label={`Stair ${idx + 1}`} value={idx} />
+            ))}
+          </Picker>
+        </View>
+      )}
+      {connectionType === 'stair-to-class' && (
+        <View style={styles.dropdownContainer}>
+          <Picker
+            selectedValue={selectedStairOnly}
+            onValueChange={(val) => setSelectedStairOnly(val)}
+            style={styles.picker}
+          >
+            <Picker.Item label="Select Stair" value={null} />
+            {normalizedStairs.map((pt, idx) => (
+              <Picker.Item key={idx} label={`Stair ${idx + 1}`} value={idx} />
+            ))}
+          </Picker>
+          <Picker
+            selectedValue={selectedClassOnly}
+            onValueChange={(val) => setSelectedClassOnly(val)}
+            style={styles.picker}
+          >
+            <Picker.Item label="Select Classroom (optional)" value={null} />
+            {normalizedClassrooms.map(cls => (
+              <Picker.Item key={cls.id} label={classroomNames[cls.id] || cls.name} value={cls.id} />
+            ))}
+          </Picker>
+        </View>
+      )}
+      <TouchableOpacity style={styles.button} onPress={handleConfirm}>
+        <Text style={styles.buttonText}>Confirm Selection</Text>
+      </TouchableOpacity>
+      <View style={styles.mapContainer}>
+        <Image
+          source={mapData.image}
+          style={{
+            width: mapData.originalWidth * baseScale,
+            height: mapData.originalHeight * baseScale,
+          }}
+          resizeMode="contain"
+        />
+        <Svg
+          width={mapData.originalWidth * baseScale}
+          height={mapData.originalHeight * baseScale}
+          style={styles.svgOverlay}
+          pointerEvents="none"
+        >
+          {linePath && (
+            <>
+              {linePath.path.length === 0 ? (
+                // Direct connection if endpoints are in same corridor
+                <Line
+                  x1={linePath.from.x}
+                  y1={linePath.from.y}
+                  x2={linePath.to.x}
+                  y2={linePath.to.y}
+                  stroke="red"
+                  strokeWidth={3}
+                />
+              ) : (
+                <>
+                  <Line
+                    x1={linePath.from.x}
+                    y1={linePath.from.y}
+                    x2={normalizedRoadPoints[linePath.path[0]].x}
+                    y2={normalizedRoadPoints[linePath.path[0]].y}
+                    stroke="red"
+                    strokeWidth={3}
+                  />
+                  {linePath.path.map((ptIdx, i) => {
+                    if (i === linePath.path.length - 1) return null;
+                    return (
+                      <Line
+                        key={i}
+                        x1={normalizedRoadPoints[ptIdx].x}
+                        y1={normalizedRoadPoints[ptIdx].y}
+                        x2={normalizedRoadPoints[linePath.path[i+1]].x}
+                        y2={normalizedRoadPoints[linePath.path[i+1]].y}
+                        stroke="red"
+                        strokeWidth={3}
+                      />
+                    );
+                  })}
+                  <Line
+                    x1={normalizedRoadPoints[linePath.path[linePath.path.length - 1]].x}
+                    y1={normalizedRoadPoints[linePath.path[linePath.path.length - 1]].y}
+                    x2={linePath.to.x}
+                    y2={linePath.to.y}
+                    stroke="red"
+                    strokeWidth={3}
+                  />
+                </>
+              )}
+            </>
+          )}
+        </Svg>
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: { 
+    flex: 1, 
+    backgroundColor: '#fff', 
+    alignItems: 'center', 
+    padding: 20 
+  },
+  title: { 
+    fontSize: 24, 
+    fontWeight: 'bold', 
+    marginBottom: 20 
+  },
+  typeContainer: {
+    flexDirection: 'row',
+    marginBottom: 20,
+  },
+  typeButton: {
+    padding: 10,
+    marginHorizontal: 10,
+    backgroundColor: '#ccc',
+  },
+  typeButtonActive: {
+    backgroundColor: 'blue',
+  },
+  typeButtonText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  dropdownContainer: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-around', 
+    marginVertical: 10 
+  },
+  picker: { 
+    height: 50, 
+    width: 180 
+  },
+  button: { 
+    marginTop: 20, 
+    backgroundColor: 'blue', 
+    padding: 10 
+  },
+  buttonText: { 
+    color: 'white', 
+    fontSize: 18, 
+    fontWeight: 'bold' 
+  },
+  mapContainer: {
+    marginTop: 30,
+  },
+  svgOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+  },
+});
+
+export default MultiConnectionScreen;

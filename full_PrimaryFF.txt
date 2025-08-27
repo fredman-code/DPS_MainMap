@@ -1,0 +1,303 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  View, 
+  Image, 
+  Dimensions, 
+  StyleSheet, 
+  Text, 
+  TouchableOpacity 
+} from 'react-native';
+import { Picker } from '@react-native-picker/picker';
+import Svg, { Line } from 'react-native-svg';
+import { collection, getDocs } from 'firebase/firestore';
+import db from '../firebaseConfig'; // Ensure db is a valid Firestore instance (e.g. getFirestore(app))
+import { adjustedMaps } from './data';
+
+// 1. Extract the Primary FF map data from adjustedMaps
+const primaryFF = adjustedMaps.find(map => map.name === "Primary FF");
+if (!primaryFF) {
+  throw new Error("Primary FF map not found in adjustedMaps");
+}
+
+const mapData = {
+  name: primaryFF.name,
+  image: primaryFF.image,
+  originalWidth: primaryFF.originalWidth,
+  originalHeight: primaryFF.originalHeight,
+};
+
+/**
+ * 2. Define roadPoints for Primary FF.
+ * IMPORTANT: Make sure this array includes all turning points referenced in your roadConnections.
+ */
+const roadPoints: number[][] = [
+  [216,971],[599,970],[214,1593],[606,1600],[1826,972],[2213,970],[2213,1593],[1826,1600],[874,1276],[1530,1281],[604,1176],[804,1173],[614,1399],[810,1386],[1817,1168],[1814,1394],
+	[1635,1394],[1633,1175]
+  // Add more turning points as needed...
+];
+
+/**
+ * 3. Derive classrooms from corridors in Primary FF (rooms are 1-indexed).
+ * Each classroom uses a fallback name "Class X" that will be replaced by a Firestore value if available.
+ */
+const classrooms = primaryFF.corridors.reduce<{ id: number; coords: number[]; name: string }[]>((acc, corridor) => {
+  corridor.rooms.forEach(roomNumber => {
+    const point = primaryFF.points[roomNumber - 1]; // roomNumber is 1-indexed
+    if (point) {
+      acc.push({
+        id: roomNumber,
+        coords: point,
+        name: `Class ${roomNumber}`
+      });
+    }
+  });
+  return acc;
+}, []);
+
+/**
+ * 4. Setup scaling to maintain the aspect ratio.
+ */
+const screenWidth = Dimensions.get('window').width;
+const screenHeight = Dimensions.get('window').height;
+const widthRatio = screenWidth / mapData.originalWidth;
+const heightRatio = screenHeight / mapData.originalHeight;
+const baseScale = Math.min(widthRatio, heightRatio);
+
+const normalize = ([x, y]: number[]): { x: number; y: number } => ({
+  x: x * baseScale,
+  y: y * baseScale,
+});
+
+const normalizedRoadPoints = roadPoints.map(normalize);
+const normalizedClassrooms = classrooms.map(({ id, coords, name }) => ({
+  id,
+  name,
+  coords: normalize(coords),
+}));
+
+/**
+ * 5. New roadConnections for Primary FF (using 1-based turning point numbers).
+ * Make sure every turning point referenced here is present in your roadPoints array.
+ */
+const roadConnections = new Map<number, number[]>([
+  [1, [2, 3]],
+  [2, [1, 4, 11]],
+  [3, [1, 4]],
+  [4, [2, 3, 13]],
+  [5, [6, 15]],
+  [6, [5, 7]],
+  [7, [6, 8]],
+  [8, [7, 16]],
+  [9, [10, 12, 14]],
+  [10, [9, 17, 18]],
+  [11, [2, 12, 13]],
+  [12, [9, 11]],
+  [13, [4, 11, 14]],
+  [14, [9, 13]],
+  [15, [5, 16, 18]],
+  [16, [8, 15, 17]],
+  [17, [10, 16]],
+  [18, [10, 15]],
+]);
+
+/**
+ * 6. Utility functions.
+ * We adjust getClosestPointIndex to return a 0-indexed turning point number.
+ */
+const getClosestPointIndex = (classroomCoords: { x: number; y: number }): number => {
+  let closestIndex = 0;
+  let minDistance = Infinity;
+  normalizedRoadPoints.forEach((point, index) => {
+    const distance = Math.sqrt(
+      Math.pow(point.x - classroomCoords.x, 2) + Math.pow(point.y - classroomCoords.y, 2)
+    );
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestIndex = index;
+    }
+  });
+  return closestIndex; // 0-indexed
+};
+
+const findValidPath = (start: number, end: number): number[] => {
+  // BFS working in 0-indexed turning point numbers.
+  let queue: number[][] = [[start]];
+  let visited = new Set<number>();
+
+  while (queue.length > 0) {
+    const path = queue.shift();
+    if (!path) continue;
+    const lastNode = path[path.length - 1];
+    if (lastNode === end) return path;
+
+    if (!visited.has(lastNode)) {
+      visited.add(lastNode);
+      // Convert roadConnections from 1-indexed to 0-indexed on the fly:
+      const neighbors = roadConnections.get(lastNode + 1);
+      if (neighbors) {
+        for (const neighbor of neighbors) {
+          const neighbor0 = neighbor - 1; // convert neighbor to 0-indexed
+          if (!visited.has(neighbor0)) {
+            queue.push([...path, neighbor0]);
+          }
+        }
+      }
+    }
+  }
+  return [];
+};
+
+/**
+ * 7. PrimaryFFOverlay Component.
+ */
+const PrimaryFFOverlay: React.FC = () => {
+  const [selectedClass1, setSelectedClass1] = useState<number | null>(null);
+  const [selectedClass2, setSelectedClass2] = useState<number | null>(null);
+  const [selectedPath, setSelectedPath] = useState<number[]>([]);
+  const [classroomNames, setClassroomNames] = useState<Record<number, string>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+
+  // Fetch classroom names from Firestore (match doc ID to classroom.id)
+  useEffect(() => {
+    const fetchClassroomNames = async () => {
+      try {
+        setLoading(true);
+        // The collection name is the same as mapData.name, e.g. "Primary FF"
+        const snapshot = await getDocs(collection(db, mapData.name));
+        const names: Record<number, string> = {};
+
+        snapshot.forEach(doc => {
+          const docId = parseInt(doc.id, 10);
+          const data = doc.data();
+          const fieldNames = Object.keys(data);
+          if (fieldNames.length > 0) {
+            names[docId] = fieldNames[0]; 
+          }
+        });
+
+        setClassroomNames(names);
+      } catch (error) {
+        console.error("Error fetching classroom names: ", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchClassroomNames();
+  }, [mapData.name]);
+
+  const handleSelection = () => {
+    if (selectedClass1 !== null && selectedClass2 !== null) {
+      const closestPoint1 = getClosestPointIndex(normalizedClassrooms[selectedClass1].coords);
+      const closestPoint2 = getClosestPointIndex(normalizedClassrooms[selectedClass2].coords);
+      const validPath = findValidPath(closestPoint1, closestPoint2);
+      setSelectedPath(validPath);
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      {/* Background Image */}
+      <Image
+        source={mapData.image}
+        style={{
+          width: mapData.originalWidth * baseScale,
+          height: mapData.originalHeight * baseScale
+        }}
+        resizeMode="contain"
+      />
+
+      {/* SVG Overlay for drawing paths */}
+      <Svg
+        width={mapData.originalWidth * baseScale}
+        height={mapData.originalHeight * baseScale}
+        style={styles.svgOverlay}
+        pointerEvents="none"
+      >
+        {selectedPath.map((pointIndex, i) => {
+          if (i === selectedPath.length - 1) return null;
+          const nextPointIndex = selectedPath[i + 1];
+          return (
+            <Line
+              key={i}
+              x1={normalizedRoadPoints[pointIndex]?.x}
+              y1={normalizedRoadPoints[pointIndex]?.y}
+              x2={normalizedRoadPoints[nextPointIndex]?.x}
+              y2={normalizedRoadPoints[nextPointIndex]?.y}
+              stroke="#333"
+              strokeWidth={2}
+            />
+          );
+        })}
+        {selectedClass1 !== null && selectedPath.length > 0 && (
+          <Line
+            x1={normalizedClassrooms[selectedClass1].coords.x}
+            y1={normalizedClassrooms[selectedClass1].coords.y}
+            x2={normalizedRoadPoints[selectedPath[0]]?.x}
+            y2={normalizedRoadPoints[selectedPath[0]]?.y}
+            stroke="#333"
+            strokeWidth={2}
+          />
+        )}
+        {selectedClass2 !== null && selectedPath.length > 0 && (
+          <Line
+            x1={normalizedClassrooms[selectedClass2].coords.x}
+            y1={normalizedClassrooms[selectedClass2].coords.y}
+            x2={normalizedRoadPoints[selectedPath[selectedPath.length - 1]]?.x}
+            y2={normalizedRoadPoints[selectedPath[selectedPath.length - 1]]?.y}
+            stroke="#333"
+            strokeWidth={2}
+          />
+        )}
+      </Svg>
+
+      {/* Dropdowns for Classroom Selection */}
+      <View style={styles.dropdownContainer}>
+        <Picker
+          selectedValue={selectedClass1}
+          onValueChange={(itemValue) => setSelectedClass1(itemValue)}
+          style={styles.picker}
+        >
+          <Picker.Item label="Select Classroom 1" value={null} />
+          {normalizedClassrooms.map((classroom, idx) => (
+            <Picker.Item
+              key={classroom.id}
+              label={classroomNames[classroom.id] || classroom.name}
+              value={idx}
+            />
+          ))}
+        </Picker>
+        <Picker
+          selectedValue={selectedClass2}
+          onValueChange={(itemValue) => setSelectedClass2(itemValue)}
+          style={styles.picker}
+        >
+          <Picker.Item label="Select Classroom 2" value={null} />
+          {normalizedClassrooms.map((classroom, idx) => (
+            <Picker.Item
+              key={classroom.id}
+              label={classroomNames[classroom.id] || classroom.name}
+              value={idx}
+            />
+          ))}
+        </Picker>
+      </View>
+
+      {/* Confirm Selection Button */}
+      <TouchableOpacity style={styles.button} onPress={handleSelection}>
+        <Text style={styles.buttonText}>Confirm Selection</Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+export default PrimaryFFOverlay;
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#fff', alignItems: 'center' },
+  svgOverlay: { position: 'absolute', top: 0, left: 0 },
+  dropdownContainer: { flexDirection: 'row', marginVertical: 10, backgroundColor: '#f2f2f2', padding: 10 },
+  picker: { height: 50, width: 180 },
+  button: { marginTop: 10, backgroundColor: 'blue', padding: 10 },
+  buttonText: { color: 'white', fontSize: 18, fontWeight: 'bold' },
+});

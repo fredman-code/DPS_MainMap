@@ -1,0 +1,88 @@
+import React from 'react';
+import { SafeAreaView, StyleSheet, FlatList, Dimensions } from 'react-native';
+import MapOverlay from './components/MapView2';
+
+const mapsData = [
+  {
+    id: '1',
+    start: { type: 'classroom', index: 56 },
+    end: { type: 'stair', index: 'nearest' },
+  },
+  {
+    id: '2',
+    start: { type: 'classroom', index: 79 },
+    end: { type: 'stair', index: 'nearest' },
+  },
+  // Add more map configurations here if needed.
+];
+
+const App = () => {
+  return (
+    <SafeAreaView style={styles.container}>
+      <FlatList
+        data={mapsData}
+        keyExtractor={(item) => item.id}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        renderItem={({ item }) => (
+          <MapOverlay start={item.start} end={item.end} />
+        )}
+      />
+    </SafeAreaView>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+});
+
+export default App;
+
+
+import React, { useState } from 'react';
+import { SafeAreaView, StyleSheet, FlatList, Dimensions, ScrollView } from 'react-native';
+import MapOverlay from './components/MapView2';
+import Primaryff from './components/Primaryff';
+import Seniorgf from './components/Seniorgf';
+import Seniorff from './components/Seniorff';
+import Dropdown from './components/dropdown';
+import Primarygf from './components/Primarygf';
+import AllClassroomsScreen from './components/dropdown';
+
+const App = () => {
+  
+  const [selectedClass1, setSelectedClass1] = useState<string | null>(null);
+  const [selectedClass2, setSelectedClass2] = useState<string | null>(null);
+  const [stairIndex, setStairIndex] = useState<number>(0);
+
+  const handleNearestStairFound = (index: number) => {
+    console.log('Nearest Stair Index is:', index);
+    setStairIndex(index);
+  };
+  
+  return (
+    <ScrollView>
+    <SafeAreaView style={styles.container}>
+      <AllClassroomsScreen onSelectClass1={setSelectedClass1} onSelectClass2={setSelectedClass2}></AllClassroomsScreen>
+      <Seniorgf start={{ type: 'classroom', index: 16 }} end={{ type: 'classroom', index: 32 }} />
+      <Seniorff start={{ type: 'classroom', index: 3 }} end={{ type: 'stair', index: 'nearest' }} />
+      <Primaryff start={{ type: 'classroom', index: 66 }} end={{ type: 'classroom', index: 15 }} />
+      <Primarygf start={{ type: 'classroom', index: 14 }} end={{ type: 'stair', index: stairIndex }} onNearestStairFound={handleNearestStairFound} />
+      <Primaryff start={{ type: 'stair', index: 'nearest' }} end={{ type: 'classroom', index: 28 }}/>
+
+
+
+    </SafeAreaView>
+    </ScrollView>
+  );
+};
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+});
+
+export default App;

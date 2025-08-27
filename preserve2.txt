@@ -1,0 +1,210 @@
+import React, { useState } from 'react';
+import { View, Image, Dimensions, StyleSheet, Text } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
+import Svg, { Line, Circle } from 'react-native-svg';
+
+const mapData = {
+  name: "Primary GF",
+  image: require("../assets/PrimaryGF.jpg"),
+  originalWidth: 2481,
+  originalHeight: 1790,
+};
+
+// Turning points of the road (only valid points)
+const roadPoints = [
+  [249, 1009], [254, 1623], [636, 1622], [644, 1012], [646, 1205],
+  [820, 1200], [910, 1303], [643, 1422], [844, 1417],
+  [2256, 1009], [2251, 1617], [1866, 1613], [1869, 1018], [1862, 1185],
+  [1678, 1206], [1605, 1304], [1661, 1412], [1852, 1421]
+];
+
+// **Define valid connections between turning points**
+const roadConnections = new Map([
+  [1, [2, 4]], [2, [1, 3]], [3, [2, 8]], [4, [1, 5]],
+  [5, [4, 6, 8]], [6, [5, 7]], [7, [6, 9, 16]], [8, [3, 5, 9]],
+  [9, [7, 8]], [10, [13]], [11, [12]], [12, [11, 18]],
+  [13, [10, 14]], [14, [13, 15, 18]], [15, [14, 16]], [16, [7, 15, 17]],
+  [17, [16, 18]], [18, [12, 14, 17]]
+]);
+
+// Example classroom positions (replace with actual values if available)
+const classrooms = [
+  { id: 1, coords: [300, 1200], name: "Class 1" },
+  { id: 2, coords: [400, 1600], name: "Class 2" },
+  { id: 3, coords: [700, 1400], name: "Class 3" },
+  { id: 4, coords: [2000, 1200], name: "Class 4" },
+  { id: 5, coords: [1800, 1400], name: "Class 5" },
+];
+
+const screenWidth = Dimensions.get('window').width;
+const screenHeight = Dimensions.get('window').height;
+
+// Calculate base scale to maintain aspect ratio
+const widthRatio = screenWidth / mapData.originalWidth;
+const heightRatio = screenHeight / mapData.originalHeight;
+const baseScale = Math.min(widthRatio, heightRatio);
+
+// Normalize function for scaling
+const normalize = ([x, y]: number[]) => ({
+  x: x * baseScale,
+  y: y * baseScale,
+});
+
+const normalizedRoadPoints = roadPoints.map(normalize);
+const normalizedClassrooms = classrooms.map(({ id, coords, name }) => ({
+  id,
+  name,
+  coords: normalize(coords),
+}));
+
+// Find the closest turning point for a given classroom
+const getClosestPointIndex = (classroomCoords: { x: number; y: number }) => {
+  let closestIndex = 0;
+  let minDistance = Infinity;
+
+  normalizedRoadPoints.forEach((point, index) => {
+    const distance = Math.sqrt(
+      Math.pow(point.x - classroomCoords.x, 2) + Math.pow(point.y - classroomCoords.y, 2)
+    );
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestIndex = index;
+    }
+  });
+
+  return closestIndex;
+};
+
+// Find shortest valid path between two turning points using BFS
+const findValidPath = (start: number, end: number) => {
+  let queue = [[start]];
+  let visited = new Set();
+
+  while (queue.length > 0) {
+    let path = queue.shift();
+    if (!path) continue;
+    let lastNode = path[path.length - 1];
+
+    if (lastNode === end) return path;
+
+    if (!visited.has(lastNode)) {
+      visited.add(lastNode);
+      let neighbors = roadConnections.get(lastNode + 1); // Adjust to 1-based index
+      if (neighbors) {
+        for (let neighbor of neighbors) {
+          if (!visited.has(neighbor - 1)) {
+            queue.push([...path, neighbor - 1]);
+          }
+        }
+      }
+    }
+  }
+
+  return [];
+};
+
+const MapOverlay = () => {
+  const [selectedClass1, setSelectedClass1] = useState<number | null>(null);
+  const [selectedClass2, setSelectedClass2] = useState<number | null>(null);
+  const [selectedPath, setSelectedPath] = useState<number[]>([]);
+
+  const handleSelection = () => {
+    if (selectedClass1 !== null && selectedClass2 !== null) {
+      const closestPoint1 = getClosestPointIndex(normalizedClassrooms[selectedClass1].coords);
+      const closestPoint2 = getClosestPointIndex(normalizedClassrooms[selectedClass2].coords);
+
+      const validPath = findValidPath(closestPoint1, closestPoint2);
+      setSelectedPath(validPath);
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      {/* Background Image */}
+      <Image
+        source={mapData.image}
+        style={{ width: mapData.originalWidth * baseScale, height: mapData.originalHeight * baseScale }}
+        resizeMode="contain"
+      />
+
+      {/* Overlay SVG elements */}
+      <Svg
+        width={mapData.originalWidth * baseScale}
+        height={mapData.originalHeight * baseScale}
+        style={styles.svgOverlay}
+      >
+        {/* Draw the valid road path */}
+        {selectedPath.map((pointIndex, i) => {
+          if (i === selectedPath.length - 1) return null;
+          const nextPointIndex = selectedPath[i + 1];
+          return (
+            <Line
+              key={i}
+              x1={normalizedRoadPoints[pointIndex].x}
+              y1={normalizedRoadPoints[pointIndex].y}
+              x2={normalizedRoadPoints[nextPointIndex].x}
+              y2={normalizedRoadPoints[nextPointIndex].y}
+              stroke="yellow"
+              strokeWidth="4"
+            />
+          );
+        })}
+
+        {/* Draw connections from classrooms to the road */}
+        {selectedClass1 !== null && selectedPath.length > 0 && (
+          <Line
+            x1={normalizedClassrooms[selectedClass1].coords.x}
+            y1={normalizedClassrooms[selectedClass1].coords.y}
+            x2={normalizedRoadPoints[selectedPath[0]].x}
+            y2={normalizedRoadPoints[selectedPath[0]].y}
+            stroke="red"
+            strokeWidth="4"
+          />
+        )}
+
+        {selectedClass2 !== null && selectedPath.length > 0 && (
+          <Line
+            x1={normalizedClassrooms[selectedClass2].coords.x}
+            y1={normalizedClassrooms[selectedClass2].coords.y}
+            x2={normalizedRoadPoints[selectedPath[selectedPath.length - 1]].x}
+            y2={normalizedRoadPoints[selectedPath[selectedPath.length - 1]].y}
+            stroke="red"
+            strokeWidth="4"
+          />
+        )}
+      </Svg>
+
+      {/* Dropdowns */}
+      <View style={styles.dropdownContainer}>
+        <Picker selectedValue={selectedClass1} onValueChange={setSelectedClass1} style={styles.picker}>
+          <Picker.Item label="Select Class 1" value={null} />
+          {classrooms.map(({ id, name }) => (
+            <Picker.Item key={id} label={name} value={id - 1} />
+          ))}
+        </Picker>
+
+        <Picker selectedValue={selectedClass2} onValueChange={setSelectedClass2} style={styles.picker}>
+          <Picker.Item label="Select Class 2" value={null} />
+          {classrooms.map(({ id, name }) => (
+            <Picker.Item key={id} label={name} value={id - 1} />
+          ))}
+        </Picker>
+      </View>
+
+      {/* Confirm Selection */}
+      <Text style={styles.button} onPress={handleSelection}>
+        Confirm Selection
+      </Text>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#fff', alignItems: 'center' },
+  svgOverlay: { position: 'absolute', top: 0, left: 0 },
+  dropdownContainer: { flexDirection: 'row', marginVertical: 10, backgroundColor: '#f2f2f2', padding: 10 },
+  picker: { height: 50, width: 180 },
+  button: { marginTop: 10, backgroundColor: 'blue', padding: 10, color: 'white', fontSize: 18, fontWeight: 'bold' }
+});
+
+export default MapOverlay;

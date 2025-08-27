@@ -1,0 +1,298 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  View, 
+  Image, 
+  Dimensions, 
+  StyleSheet, 
+  Text, 
+  TouchableOpacity 
+} from 'react-native';
+import { Picker } from '@react-native-picker/picker';
+import Svg, { Line } from 'react-native-svg';
+import { collection, getDocs } from 'firebase/firestore';
+import db from '../firebaseConfig';
+import { adjustedMaps } from './data';
+
+// Extract the Primary GF map data from adjustedMaps
+const seniorGF = adjustedMaps.find(map => map.name === "Senior GF");
+
+if (!seniorGF) {
+  throw new Error("Primary GF map not found in adjustedMaps");
+}
+
+const mapData = {
+  name: seniorGF.name,
+  image: seniorGF.image,
+  originalWidth: seniorGF.originalWidth,
+  originalHeight: seniorGF.originalHeight,
+};
+
+// Use the original turning points
+const roadPoints: number[][] = [
+  [415,814],[1251,827],[1445,818],[1995,820],[2719,816],[2713,694],[2754,628],[1273,1240],[1267,2015],[899,2027],[895,1929],[349,1931]
+];
+
+// Build classroom list from corridors in "Primary GF"
+const classrooms = seniorGF.corridors.reduce<{ id: number; coords: number[]; name: string }[]>(
+  (acc, corridor) => {
+    corridor.rooms.forEach(roomNumber => {
+      const point = seniorGF.points[roomNumber - 1]; // 1-based index
+      if (point) {
+        acc.push({
+          id: roomNumber,
+          coords: point,
+          name: `Class ${roomNumber}`, // Fallback name
+        });
+      }
+    });
+    return acc;
+  },
+  []
+);
+
+// ------------------------------
+// Scaling Setup
+// ------------------------------
+const screenWidth = Dimensions.get('window').width;
+const screenHeight = Dimensions.get('window').height;
+const widthRatio = screenWidth / mapData.originalWidth;
+const heightRatio = screenHeight / mapData.originalHeight;
+const baseScale = Math.min(widthRatio, heightRatio);
+
+const normalize = ([x, y]: number[]) => ({
+  x: x * baseScale,
+  y: y * baseScale,
+});
+
+const normalizedRoadPoints = roadPoints.map(normalize);
+const normalizedClassrooms = classrooms.map(({ id, coords, name }) => ({
+  id,
+  name,
+  coords: normalize(coords),
+}));
+
+// ------------------------------
+// Road Connections (unchanged)
+// ------------------------------
+const roadConnections = new Map<number, number[]>([
+  [1, [2]],           // (1,2)
+  [2, [1, 3, 8]],      // (1,2), (2,3), (2,8)
+  [3, [2, 4]],         // (2,3), (4,3)
+  [4, [3, 5]],         // (4,3), (4,5)
+  [5, [4, 6]],         // (4,5), (5,6)
+  [6, [5, 7]],         // (5,6), (6,7)
+  [7, [6]],            // (6,7)
+  [8, [2, 9]],         // (2,8), (9,8)
+  [9, [8, 10]],        // (9,8), (10,9)
+  [10, [9, 11]],       // (10,9), (11,10)
+  [11, [10, 12]],      // (11,10), (12,11)
+  [12, [11]]
+]);
+
+// ------------------------------
+// Utility Functions
+// ------------------------------
+const getClosestPointIndex = (classroomCoords: { x: number; y: number }): number => {
+  let closestIndex = 0;
+  let minDistance = Infinity;
+  normalizedRoadPoints.forEach((point, index) => {
+    const distance = Math.sqrt(
+      Math.pow(point.x - classroomCoords.x, 2) + Math.pow(point.y - classroomCoords.y, 2)
+    );
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestIndex = index;
+    }
+  });
+  return closestIndex;
+};
+
+const findValidPath = (start: number, end: number): number[] => {
+  let queue: number[][] = [[start]];
+  let visited = new Set<number>();
+
+  while (queue.length > 0) {
+    const path = queue.shift();
+    if (!path) continue;
+    const lastNode = path[path.length - 1];
+    if (lastNode === end) return path;
+
+    if (!visited.has(lastNode)) {
+      visited.add(lastNode);
+      const neighbors = roadConnections.get(lastNode + 1); // 1-based
+      if (neighbors) {
+        for (const neighbor of neighbors) {
+          if (!visited.has(neighbor - 1)) {
+            queue.push([...path, neighbor - 1]);
+          }
+        }
+      }
+    }
+  }
+  return [];
+};
+
+// ------------------------------
+// MapOverlay Component
+// ------------------------------
+const MapOverlay: React.FC = () => {
+  const [selectedClass1, setSelectedClass1] = useState<number | null>(null);
+  const [selectedClass2, setSelectedClass2] = useState<number | null>(null);
+  const [selectedPath, setSelectedPath] = useState<number[]>([]);
+  const [classroomNames, setClassroomNames] = useState<Record<number, string>>({});
+  const [loading, setLoading] = useState<boolean>(true);
+
+  // Fetch classroom names from Firestore (match doc ID to classroom.id)
+  useEffect(() => {
+    const fetchClassroomNames = async () => {
+      try {
+        setLoading(true);
+        // The collection name is the same as mapData.name, e.g. "Primary GF"
+        const snapshot = await getDocs(collection(db,mapData.name));
+        console.log(db)
+        console.log(mapData)
+        const names: Record<number, string> = {};
+
+        snapshot.forEach(doc => {
+          // Convert doc ID (e.g., "1", "10") to a number
+          const docId = parseInt(doc.id, 10);
+          const data = doc.data();
+          // If your Firestore doc has "KG 1 - A": "some value",
+          // we can use the first field name as the label
+          const fieldNames = Object.keys(data);
+          if (fieldNames.length > 0) {
+            // For example, fieldNames[0] might be "KG 1 - A"
+            names[docId] = fieldNames[0];
+          }
+        });
+
+        setClassroomNames(names);
+      } catch (error) {
+        console.error("Error fetching classroom names: ", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchClassroomNames();
+  }, [mapData.name]);
+
+  const handleSelection = () => {
+    if (selectedClass1 !== null && selectedClass2 !== null) {
+      const closestPoint1 = getClosestPointIndex(normalizedClassrooms[selectedClass1].coords);
+      const closestPoint2 = getClosestPointIndex(normalizedClassrooms[selectedClass2].coords);
+      const validPath = findValidPath(closestPoint1, closestPoint2);
+      setSelectedPath(validPath);
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      {/* Background Image */}
+      <Image
+        source={mapData.image}
+        style={{
+          width: mapData.originalWidth * baseScale,
+          height: mapData.originalHeight * baseScale
+        }}
+        resizeMode="contain"
+      />
+
+      {/* Overlay SVG Elements */}
+      <Svg
+        width={mapData.originalWidth * baseScale}
+        height={mapData.originalHeight * baseScale}
+        style={styles.svgOverlay}
+        pointerEvents="none"
+      >
+        {/* Draw the valid road path */}
+        {selectedPath.map((pointIndex, i) => {
+          if (i === selectedPath.length - 1) return null;
+          const nextPointIndex = selectedPath[i + 1];
+          return (
+            <Line
+              key={i}
+              x1={normalizedRoadPoints[pointIndex].x}
+              y1={normalizedRoadPoints[pointIndex].y}
+              x2={normalizedRoadPoints[nextPointIndex].x}
+              y2={normalizedRoadPoints[nextPointIndex].y}
+              stroke="#333"
+              strokeWidth={2}
+            />
+          );
+        })}
+        {/* Draw connection lines from classrooms to the road */}
+        {selectedClass1 !== null && selectedPath.length > 0 && (
+          <Line
+            x1={normalizedClassrooms[selectedClass1].coords.x}
+            y1={normalizedClassrooms[selectedClass1].coords.y}
+            x2={normalizedRoadPoints[selectedPath[0]].x}
+            y2={normalizedRoadPoints[selectedPath[0]].y}
+            stroke="#333"
+            strokeWidth={2}
+          />
+        )}
+        {selectedClass2 !== null && selectedPath.length > 0 && (
+          <Line
+            x1={normalizedClassrooms[selectedClass2].coords.x}
+            y1={normalizedClassrooms[selectedClass2].coords.y}
+            x2={normalizedRoadPoints[selectedPath[selectedPath.length - 1]].x}
+            y2={normalizedRoadPoints[selectedPath[selectedPath.length - 1]].y}
+            stroke="#333"
+            strokeWidth={2}
+          />
+        )}
+      </Svg>
+
+      {/* Dropdowns for Classroom Selection */}
+      <View style={styles.dropdownContainer}>
+        <Picker
+          selectedValue={selectedClass1}
+          onValueChange={(itemValue) => setSelectedClass1(itemValue)}
+          style={styles.picker}
+        >
+          <Picker.Item label="Select Classroom 1" value={null} />
+          {normalizedClassrooms.map((classroom, idx) => (
+            <Picker.Item
+              key={classroom.id}
+              // If a Firestore name was found for doc ID = classroom.id, use that.
+              // Otherwise, fall back to the default name "Class X".
+              label={classroomNames[classroom.id] || classroom.name}
+              value={idx}
+            />
+          ))}
+        </Picker>
+        <Picker
+          selectedValue={selectedClass2}
+          onValueChange={(itemValue) => setSelectedClass2(itemValue)}
+          style={styles.picker}
+        >
+          <Picker.Item label="Select Classroom 2" value={null} />
+          {normalizedClassrooms.map((classroom, idx) => (
+            <Picker.Item
+              key={classroom.id}
+              label={classroomNames[classroom.id] || classroom.name}
+              value={idx}
+            />
+          ))}
+        </Picker>
+      </View>
+
+      {/* Confirm Selection Button */}
+      <TouchableOpacity style={styles.button} onPress={handleSelection}>
+        <Text style={styles.buttonText}>Confirm Selection</Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#fff', alignItems: 'center' },
+  svgOverlay: { position: 'absolute', top: 0, left: 0 },
+  dropdownContainer: { flexDirection: 'row', marginVertical: 10, backgroundColor: '#f2f2f2', padding: 10 },
+  picker: { height: 50, width: 180 },
+  button: { marginTop: 10, backgroundColor: 'blue', padding: 10 },
+  buttonText: { color: 'white', fontSize: 18, fontWeight: 'bold' },
+});
+
+export default MapOverlay;
